@@ -7,7 +7,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from heapq import heappop, heappush
 from math import sqrt
-from enum import Enum, StrEnum, auto
+from enum import Enum, StrEnum, IntEnum, auto
 from typing import Any, ClassVar, Literal
 
 import gymnasium as gym
@@ -33,6 +33,13 @@ class AgentType(StrEnum):
     """
     UGV = auto()
     UAV = auto()
+
+# class Action(IntEnum):
+#     STAY = 0
+#     UP = 1
+#     DOWN = 2
+#     LEFT = 3
+#     RIGHT = 4
 
 class AgentMode(StrEnum):
     """
@@ -88,6 +95,15 @@ class SARGridExecutionEnv(gym.Env):
 
     metadata = {"render_modes": ["ansi"], "render_fps": 4}
 
+    AGENT_TYPE_TO_ID: ClassVar[dict[AgentType, int]] = {
+        AgentType.UGV: 0,
+        AgentType.UAV: 1,
+    }
+    REWARDS: ClassVar[dict[str, float]] = {
+        reward.label: reward.weight
+        for reward in Reward
+    }
+
     def __init__(
         self,
         grid_size: tuple[int, int] = (10, 10), # size of env
@@ -106,16 +122,25 @@ class SARGridExecutionEnv(gym.Env):
     ) -> None:
         super().__init__()
 
+        # Accept both enum members and their string values.
+        agent_mode = AgentMode(agent_mode)
+        spawn_mode = SpawnMode(spawn_mode)
+
         self._validate_init_args(
             grid_size=grid_size,
+            agent_mode=agent_mode,
+            num_ugv=num_ugv,
+            num_uav=num_uav,
             num_targets=num_targets,
             max_battery=max_battery,
             max_steps=max_steps,
             obstacle_ratio=obstacle_ratio,
             no_fly_ratio=no_fly_ratio,
-            spawn_mode=spawn_mode,
-                )
-        
+        )
+
+        if max_reset_tries <= 0:
+            raise ValueError("max_reset_tries must be greater than 0.")
+
         self.grid_height, self.grid_width = grid_size
         self.agent_mode = agent_mode
         self.num_ugv = num_ugv
@@ -142,8 +167,6 @@ class SARGridExecutionEnv(gym.Env):
         if not self._in_bounds(self.base_position):
             raise ValueError("base_position must be inside the grid.")
 
-        # Option B:
-        # The env has no allocation/movement action.
         # action=0 means "advance simulation by one tick using current routes".
         self.action_space = spaces.Discrete(1)
 
@@ -1063,28 +1086,17 @@ class SARGridExecutionEnv(gym.Env):
     def _build_agent_types(
         *,
         agent_mode: AgentMode,
-        num_agents: int,
         num_ugv: int,
         num_uav: int,
     ) -> list[AgentType]:
-        if agent_mode == "ugv":
-            if num_agents <= 0:
-                raise ValueError("num_agents must be greater than 0.")
-            return ["ugv"] * num_ugv
+        if agent_mode == AgentMode.UGV:
+            return [AgentType.UGV] * num_ugv
 
-        if agent_mode == "uav":
-            if num_agents <= 0:
-                raise ValueError("num_agents must be greater than 0.")
-            return ["uav"] * num_uav
+        if agent_mode == AgentMode.UAV:
+            return [AgentType.UAV] * num_uav
 
-        if agent_mode == "both":
-            if num_ugv <= 0:
-                raise ValueError("num_ugv must be greater than 0 when agent_mode='both'.")
-
-            if num_uav <= 0:
-                raise ValueError("num_uav must be greater than 0 when agent_mode='both'.")
-
-            return (["ugv"] * num_ugv) + (["uav"] * num_uav)
+        if agent_mode == AgentMode.BOTH:
+            return ([AgentType.UGV] * num_ugv) + ([AgentType.UAV] * num_uav)
 
         raise ValueError("agent_mode must be one of: 'ugv', 'uav', 'both'.")
 
@@ -1100,33 +1112,37 @@ class SARGridExecutionEnv(gym.Env):
         max_steps: int,
         obstacle_ratio: float,
         no_fly_ratio: float,
-    )
-        if grid_size[0] <=1 or grid_size[1] <= 1:
-            raise ValueError("grid_size must be at least (2,2).")
-    
+    ) -> None:
+        if len(grid_size) != 2 or grid_size[0] <= 1 or grid_size[1] <= 1:
+            raise ValueError("grid_size must be a two-dimensional size of at least (2, 2).")
+
         if agent_mode == AgentMode.UGV and num_ugv <= 0:
-            raise ValueError("In UGV mode: num_ugv must be greater than 0.")
-    
+            raise ValueError("In UGV mode, num_ugv must be greater than 0.")
+
         if agent_mode == AgentMode.UAV and num_uav <= 0:
-            raise ValueError("In UAV mode: num_uav must be greater than 0.")
+            raise ValueError("In UAV mode, num_uav must be greater than 0.")
 
         if agent_mode == AgentMode.BOTH and (num_uav <= 0 or num_ugv <= 0):
-            raise ValueError("In BOTH mode: requires atleast 1 agent for each of the agent types.")
-                    
+            raise ValueError(
+                "In BOTH mode, at least one UGV and one UAV are required."
+            )
+
         if num_targets <= 0:
             raise ValueError("num_targets must be greater than 0.")
-    
+
         if max_battery <= 0:
             raise ValueError("max_battery must be greater than 0.")
 
         if max_steps <= 0:
             raise ValueError("max_steps must be greater than 0.")
 
-        if obstacle_ratio > 1 or obstacle_ratio < 0 :
-            raise ValueError("obstacle_ratio must be in range [0,1] inclusive.")
+        # A ratio of 1.0 would make the placement loops unable to leave the
+        # base cell unblocked.
+        if not 0.0 <= obstacle_ratio < 1.0:
+            raise ValueError("obstacle_ratio must be in range [0.0, 1.0).")
 
-        if no_fly_ratio > 1 or no_fly_ratio < 0 :
-            raise ValueError("no_fly_ratio must be in range [0,1] inclusive.")
+        if not 0.0 <= no_fly_ratio < 1.0:
+            raise ValueError("no_fly_ratio must be in range [0.0, 1.0).")
             
 SARGridEnv = SARGridExecutionEnv
 
