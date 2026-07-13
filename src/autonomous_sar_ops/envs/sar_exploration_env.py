@@ -11,6 +11,9 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
+from autonomous_sar_ops.envs.grid_utils import get_reachable_cells, get_chebyshev_distance
+from autonomous_sar_ops.envs.map_generation import generate_obstacle_grid
+
 
 class Action(IntEnum):
     """Discrete movement actions available to each agent."""
@@ -98,24 +101,15 @@ class SARExplorationEnv(gym.Env):
     ### Descriptions
 
     The environment contains:
-        - a hidden true obstacle map;
-        - a partially observed map visible to the policy;
-        - hidden victim locations;
-        - one or more agents controlled through direct movement actions.
+        - a partially observed map visible to the policy
+        - hidden map structure
+        - hidden victim locations
+        - one/more agents controlled through direct movement actions
 
     The task is exploration only:
-        - discover new map cells;
-        - locate hidden victims;
-        - avoid collisions and unnecessary revisits.
-
-    This environment intentionally excludes:
-        - MILP scheduling;
-        - route assignment;
-        - A* execution;
-        - victim transport;
-        - target priorities;
-        - heterogeneous UAV/UGV movement;
-        - battery constraints.
+        - discover new map cells
+        - locate hidden victims
+        - avoid collisions and unnecessary revisits
 
     ### Observation
 
@@ -164,6 +158,7 @@ class SARExplorationEnv(gym.Env):
     FREE: ClassVar[np.int8] = np.int8(0)
     OBSTACLE: ClassVar[np.int8] = np.int8(1)
 
+    # Actions dict
     ACTION_TO_DELTA: ClassVar[dict[Action, tuple[int, int]]] = {
         Action.STAY: (0, 0),
         Action.UP: (-1, 0),
@@ -172,30 +167,24 @@ class SARExplorationEnv(gym.Env):
         Action.RIGHT: (0, 1),
     }
 
+    # Rewards dict
     DEFAULT_REWARDS: ClassVar[dict[str, float]] = {
-        "step": DEFAULT_REWARDS_[RewardName.STEP],
-        "new_cell": DEFAULT_REWARDS_[RewardName.NEW_CELL],
-        "new_map_cell": DEFAULT_REWARDS_[RewardName.NEW_MAP_CELL],
-        "victim_found": DEFAULT_REWARDS_[RewardName.VICTIM_FOUND],
-        "all_victims_found": DEFAULT_REWARDS_[RewardName.ALL_VICTIMS_FOUND],
-        "revisit": DEFAULT_REWARDS_[RewardName.REVISIT],
-        "collision": DEFAULT_REWARDS_[RewardName.COLLISION],
-        "idle": DEFAULT_REWARDS_[RewardName.IDLE],
-        "timeout": DEFAULT_REWARDS_[RewardName.TIMEOUT],
+        reward_name.value: reward_value
+        for reward_name, reward_value in DEFAULT_REWARDS_.items()
     }
 
     def __init__(
         self,
-        grid_size: tuple[int, int] = (8, 8),
-        num_agents: int = 1,
-        num_victims: int = 1,
-        obstacle_ratio: float = 0.10,
-        sensor_range: int = 1,
-        max_steps: int = 100,
-        base_position: tuple[int, int] = (0, 0),
-        allow_agent_overlap: bool = True,
-        reward_weights: dict[str, float] | None = None,
-        max_reset_tries: int = 200,
+        grid_size: tuple[int, int] = (8, 8), # env size
+        num_agents: int = 1, # total number of agents in sim
+        num_victims: int = 1, # total number of victims in sim
+        obstacle_ratio: float = 0.10, # ratios of obstacles in map
+        sensor_range: int = 1, # range of scanning sensor of each agent
+        max_steps: int = 100, # max steps agent can take in this run
+        base_position: tuple[int, int] = (0, 0), # spawn position of the agent(s)
+        allow_agent_overlap: bool = True,  
+        reward_weights: dict[str, float] | None = None, # reward weights based on given reward set
+        max_reset_tries: int = 200, # max times the map can reset to reconstruct the map
         render_mode: str | None = None,
     ) -> None:
         super().__init__()
@@ -243,6 +232,7 @@ class SARExplorationEnv(gym.Env):
                 }
             )
 
+        # Set up action space for single agent mode and multi-agent mode
         if self.num_agents == 1:
             self.action_space = spaces.Discrete(len(Action))
         else:
@@ -254,6 +244,7 @@ class SARExplorationEnv(gym.Env):
                 )
             )
 
+        # Map details from agent(s) view
         self.observation_space = spaces.Box(
             low=0.0,
             high=1.0,
@@ -265,7 +256,8 @@ class SARExplorationEnv(gym.Env):
             dtype=np.float32,
         )
 
-        self.true_obstacle_grid: np.ndarray
+        # Capture map structure details
+        self.obstacle_grid: np.ndarray
         self.known_obstacle_grid: np.ndarray
         self.discovered_victim_grid: np.ndarray
         self.visited: np.ndarray
@@ -274,6 +266,7 @@ class SARExplorationEnv(gym.Env):
         self.victim_positions: list[tuple[int, int]]
         self.victim_found: np.ndarray
 
+        # Keep track of step count
         self.step_count: int = 0
 
     def reset(
@@ -282,6 +275,9 @@ class SARExplorationEnv(gym.Env):
         seed: int | None = None,
         options: dict[str, Any] | None = None,
     ) -> tuple[np.ndarray, dict[str, Any]]:
+        """
+        Set up env based on given options/seed.
+        """
         super().reset(seed=seed)
 
         if options:
@@ -289,40 +285,8 @@ class SARExplorationEnv(gym.Env):
 
         self.step_count = 0
 
-        for _ in range(self.max_reset_tries):
-            self.true_obstacle_grid = self._generate_true_obstacle_grid()
-
-            free_reachable_cells = sorted(
-                self._get_reachable_free_cells_from_base()
-            )
-
-            candidate_victim_cells = [
-                cell
-                for cell in free_reachable_cells
-                if cell != self.base_position
-            ]
-
-            if len(candidate_victim_cells) < self.num_victims:
-                continue
-
-            selected_indices = self.np_random.choice(
-                len(candidate_victim_cells),
-                size=self.num_victims,
-                replace=False,
-            )
-
-            self.victim_positions = [
-                candidate_victim_cells[int(index)]
-                for index in selected_indices
-            ]
-
-            break
-        else:
-            raise RuntimeError(
-                "Could not generate a valid reachable map with enough "
-                "victim cells. Reduce obstacle_ratio or num_victims."
-            )
-
+        self._generate_map()
+        
         self.known_obstacle_grid = np.full(
             (self.grid_height, self.grid_width),
             self.UNKNOWN,
@@ -363,51 +327,128 @@ class SARExplorationEnv(gym.Env):
         info = self._get_info()
 
         return obs, info
+    def _generate_map(self):
+        """
+        Generate map for env.
+        """
+        for _ in range(self.max_reset_tries):
+            # Choose cells to have obstacles (not base)
+            self.obstacle_grid = generate_obstacle_grid(
+                grid_height=self.grid_height,
+                grid_width=self.grid_width,
+                obstacle_ratio=self.obstacle_ratio,
+                base_position=self.base_position,
+                rng=self.np_random,
+                free_value=int(self.FREE),
+                obstacle_value=int(self.OBSTACLE),
+            )
+
+            free_reachable_cells = sorted(
+                get_reachable_cells(
+                    grid=self.obstacle_grid,
+                    start=self.base_position,
+                    blocked_value=int(self.OBSTACLE),
+                )
+            )
+
+            # Candidate cells that could be victims
+            # There should always be a feasible way for the agent to reach the victim(s) - default
+            candidate_victim_cells = [
+                cell
+                for cell in free_reachable_cells
+                if cell != self.base_position
+            ]
+
+            # Skip if there is not enough feasible candidate cells
+            if len(candidate_victim_cells) < self.num_victims:
+                continue
+
+            # Randomly choose cells from candidates cells that could be victims
+            selected_indices = self.np_random.choice(
+                len(candidate_victim_cells),
+                size=self.num_victims,
+                replace=False,
+            )
+
+            # Record the positions of the victims (in env)
+            self.victim_positions = [
+                candidate_victim_cells[int(index)]
+                for index in selected_indices
+            ]
+
+            return
+        else:
+            raise RuntimeError(
+                "Could not generate a valid reachable map with enough "
+                "victim cells. Reduce obstacle_ratio or num_victims."
+            ) 
+        
+    def _add_reward(
+        self,
+        *,
+        reward_parts: dict[str, float],
+        reward_reasons: list[dict[str, Any]],
+        reward_name: RewardName,
+        agent_id: int | None,
+        reason: str,
+        multiplier: float = 1.0,
+        metadata: dict[str, Any] | None = None,
+    ) -> float:
+        """Add one reward contribution and record why it was applied."""
+        base_weight = float(self.reward_weights[reward_name.value])
+        contribution = base_weight * float(multiplier)
+
+        reward_parts[reward_name.value] += contribution
+        reward_reasons.append(
+            {
+                "reward_name": reward_name.value,
+                "value": float(contribution),
+                "base_weight": base_weight,
+                "multiplier": float(multiplier),
+                "agent_id": agent_id,
+                "reason": reason,
+                "metadata": metadata or {},
+            }
+        )
+        return float(contribution)
 
     def step(
         self,
-        action: int | np.ndarray | list[int] | tuple[int, int],
+        action: int | np.ndarray | list[int] | tuple[int, ...],
     ) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
         actions = self._normalise_actions(action)
-
         self.step_count += 1
 
-        reward_parts = {
-            key: 0.0
-            for key in self.reward_weights
-        }
+        reward_parts = {key: 0.0 for key in self.reward_weights}
+        reward_reasons: list[dict[str, Any]] = []
 
-        reward_parts["step"] += self.reward_weights["step"]
+        self._add_reward(
+            reward_parts=reward_parts,
+            reward_reasons=reward_reasons,
+            reward_name=RewardName.STEP,
+            agent_id=None,
+            reason="Environment advanced by one time step.",
+            metadata={"step_count": self.step_count},
+        )
 
         newly_visited = 0
         newly_revealed = 0
         newly_found = 0
         collisions = 0
         revisits = 0
-        idle_actions = 0
-
+        failed_map_movements = 0
+        deliberate_stays = 0
+        agent_conflicts = 0
         events: list[dict[str, Any]] = []
 
-        current_positions = [
-            agent.position
-            for agent in self.agents
-        ]
-
+        current_positions = [agent.position for agent in self.agents]
         proposed_positions: list[tuple[int, int]] = []
 
-        for agent, action_id in zip(
-            self.agents,
-            actions,
-            strict=True,
-        ):
+        for agent, action_id in zip(self.agents, actions, strict=True):
             selected_action = Action(int(action_id))
             delta_row, delta_col = self.ACTION_TO_DELTA[selected_action]
-
             proposed_positions.append(
-                (
-                    agent.position[0] + delta_row,
-                    agent.position[1] + delta_col,
-                )
+                (agent.position[0] + delta_row, agent.position[1] + delta_col)
             )
 
         conflicting_destinations = self._get_conflicting_destinations(
@@ -415,89 +456,168 @@ class SARExplorationEnv(gym.Env):
             current_positions=current_positions,
         )
 
-        for agent_index, (
-            agent,
-            action_id,
-            proposed_position,
-        ) in enumerate(
-            zip(
-                self.agents,
-                actions,
-                proposed_positions,
-                strict=True,
-            )
+        for agent_index, (agent, action_id, proposed_position) in enumerate(
+            zip(self.agents, actions, proposed_positions, strict=True)
         ):
             selected_action = Action(int(action_id))
             previous_position = agent.position
-
-            if selected_action == Action.STAY:
-                idle_actions += 1
-                reward_parts["idle"] += self.reward_weights["idle"]
-
+            movement_attempted = selected_action != Action.STAY
             collision_reason: str | None = None
 
-            if selected_action != Action.STAY:
+            if selected_action == Action.STAY:
+                # Deliberate waiting/yielding is not an IDLE failure.
+                deliberate_stays += 1
+                final_position = previous_position
+                events.append(
+                    {
+                        "type": "deliberate_stay",
+                        "agent_id": agent.id,
+                        "position": previous_position,
+                        "action": selected_action.name,
+                    }
+                )
+            else:
                 if not self._in_bounds(proposed_position):
                     collision_reason = "out_of_bounds"
-
                 else:
                     row, col = proposed_position
-
-                    if self.true_obstacle_grid[row, col] == self.OBSTACLE:
+                    if self.obstacle_grid[row, col] == self.OBSTACLE:
                         self.known_obstacle_grid[row, col] = self.OBSTACLE
                         collision_reason = "obstacle"
-
                     elif (
                         not self.allow_agent_overlap
                         and agent_index in conflicting_destinations
                     ):
                         collision_reason = "agent_conflict"
 
-            if collision_reason is not None:
-                collisions += 1
-                reward_parts["collision"] += self.reward_weights["collision"]
+                if collision_reason is not None:
+                    collisions += 1
+                    final_position = previous_position
 
-                events.append(
-                    {
-                        "type": "collision",
-                        "agent_id": agent.id,
-                        "reason": collision_reason,
-                        "attempted_position": proposed_position,
-                    }
-                )
+                    self._add_reward(
+                        reward_parts=reward_parts,
+                        reward_reasons=reward_reasons,
+                        reward_name=RewardName.COLLISION,
+                        agent_id=agent.id,
+                        reason=f"Movement failed because of {collision_reason}.",
+                        metadata={
+                            "previous_position": previous_position,
+                            "attempted_position": proposed_position,
+                            "collision_reason": collision_reason,
+                            "action": selected_action.name,
+                        },
+                    )
 
-                final_position = previous_position
+                    # IDLE applies only to failed movement against the map.
+                    # It is not applied to agent_conflict or deliberate STAY.
+                    if collision_reason in {"obstacle", "out_of_bounds"}:
+                        failed_map_movements += 1
+                        self._add_reward(
+                            reward_parts=reward_parts,
+                            reward_reasons=reward_reasons,
+                            reward_name=RewardName.IDLE,
+                            agent_id=agent.id,
+                            reason=(
+                                "Agent remained in the same cell because "
+                                "movement failed against the map."
+                            ),
+                            metadata={
+                                "position": previous_position,
+                                "attempted_position": proposed_position,
+                                "collision_reason": collision_reason,
+                                "action": selected_action.name,
+                            },
+                        )
+                    else:
+                        agent_conflicts += 1
 
-            else:
-                final_position = proposed_position
-                agent.position = final_position
+                    events.append(
+                        {
+                            "type": "collision",
+                            "agent_id": agent.id,
+                            "reason": collision_reason,
+                            "attempted_position": proposed_position,
+                        }
+                    )
+                else:
+                    final_position = proposed_position
+                    agent.position = final_position
 
             row, col = final_position
+            movement_succeeded = (
+                movement_attempted
+                and collision_reason is None
+                and final_position != previous_position
+            )
 
-            if self.visited[row, col] == 0:
-                newly_visited += 1
-                reward_parts["new_cell"] += self.reward_weights["new_cell"]
-            else:
-                revisits += 1
-                reward_parts["revisit"] += self.reward_weights["revisit"]
-
-            self.visited[row, col] += 1
+            # A failed move or deliberate STAY is not counted as REVISIT.
+            if movement_succeeded:
+                if self.visited[row, col] == 0:
+                    newly_visited += 1
+                    self._add_reward(
+                        reward_parts=reward_parts,
+                        reward_reasons=reward_reasons,
+                        reward_name=RewardName.NEW_CELL,
+                        agent_id=agent.id,
+                        reason="Agent entered a previously unvisited cell.",
+                        metadata={
+                            "previous_position": previous_position,
+                            "new_position": final_position,
+                            "action": selected_action.name,
+                        },
+                    )
+                else:
+                    revisits += 1
+                    self._add_reward(
+                        reward_parts=reward_parts,
+                        reward_reasons=reward_reasons,
+                        reward_name=RewardName.REVISIT,
+                        agent_id=agent.id,
+                        reason="Agent entered a previously visited cell.",
+                        metadata={
+                            "previous_position": previous_position,
+                            "new_position": final_position,
+                            "previous_visit_count": int(self.visited[row, col]),
+                            "action": selected_action.name,
+                        },
+                    )
+                self.visited[row, col] += 1
 
             revealed_count = self._reveal_around(final_position)
             newly_revealed += revealed_count
-            reward_parts["new_map_cell"] += (
-                revealed_count
-                * self.reward_weights["new_map_cell"]
-            )
+            if revealed_count > 0:
+                self._add_reward(
+                    reward_parts=reward_parts,
+                    reward_reasons=reward_reasons,
+                    reward_name=RewardName.NEW_MAP_CELL,
+                    agent_id=agent.id,
+                    reason=(
+                        f"Agent revealed {revealed_count} previously unknown "
+                        "map cell(s)."
+                    ),
+                    multiplier=float(revealed_count),
+                    metadata={
+                        "position": final_position,
+                        "revealed_count": revealed_count,
+                    },
+                )
 
             found_victim_ids = self._detect_victims(final_position)
             found_count = len(found_victim_ids)
             newly_found += found_count
-
-            reward_parts["victim_found"] += (
-                found_count
-                * self.reward_weights["victim_found"]
-            )
+            if found_count > 0:
+                self._add_reward(
+                    reward_parts=reward_parts,
+                    reward_reasons=reward_reasons,
+                    reward_name=RewardName.VICTIM_FOUND,
+                    agent_id=agent.id,
+                    reason=f"Agent discovered {found_count} victim(s).",
+                    multiplier=float(found_count),
+                    metadata={
+                        "victim_ids": found_victim_ids,
+                        "agent_position": final_position,
+                    },
+                )
 
             for victim_id in found_victim_ids:
                 events.append(
@@ -511,25 +631,40 @@ class SARExplorationEnv(gym.Env):
 
         all_victims_found = bool(np.all(self.victim_found))
         terminated = all_victims_found
-        truncated = (
-            self.step_count >= self.max_steps
-            and not terminated
-        )
+        truncated = self.step_count >= self.max_steps and not terminated
 
         if terminated:
-            reward_parts["all_victims_found"] += self.reward_weights[
-                "all_victims_found"
-            ]
+            self._add_reward(
+                reward_parts=reward_parts,
+                reward_reasons=reward_reasons,
+                reward_name=RewardName.ALL_VICTIMS_FOUND,
+                agent_id=None,
+                reason="All victims were discovered.",
+                metadata={"step_count": self.step_count},
+            )
 
         if truncated:
-            reward_parts["timeout"] += self.reward_weights["timeout"]
+            self._add_reward(
+                reward_parts=reward_parts,
+                reward_reasons=reward_reasons,
+                reward_name=RewardName.TIMEOUT,
+                agent_id=None,
+                reason=(
+                    "Episode reached max_steps before all victims were discovered."
+                ),
+                metadata={
+                    "step_count": self.step_count,
+                    "victims_found": int(self.victim_found.sum()),
+                    "num_victims": self.num_victims,
+                },
+            )
 
         reward = float(sum(reward_parts.values()))
-
         info = self._get_info()
         info.update(
             {
                 "reward_parts": reward_parts,
+                "reward_reasons": reward_reasons,
                 "events": events,
                 "metrics": {
                     "newly_visited": newly_visited,
@@ -537,20 +672,16 @@ class SARExplorationEnv(gym.Env):
                     "newly_found": newly_found,
                     "collisions": collisions,
                     "revisits": revisits,
-                    "idle_actions": idle_actions,
+                    "failed_map_movements": failed_map_movements,
+                    "deliberate_stays": deliberate_stays,
+                    "agent_conflicts": agent_conflicts,
                     "coverage_percentage": self._get_coverage_percentage(),
                     "explored_percentage": self._get_explored_percentage(),
                 },
             }
         )
 
-        return (
-            self._get_obs(),
-            reward,
-            terminated,
-            truncated,
-            info,
-        )
+        return self._get_obs(), reward, terminated, truncated, info
 
     def render(self) -> str | None:
         if self.render_mode != "ansi":
@@ -617,7 +748,7 @@ class SARExplorationEnv(gym.Env):
         """
 
         return {
-            "true_obstacle_grid": self.true_obstacle_grid.copy(),
+            "obstacle_grid": self.obstacle_grid.copy(),
             "victim_positions": list(self.victim_positions),
             "victim_found": self.victim_found.copy(),
             "agent_positions": [
@@ -628,7 +759,7 @@ class SARExplorationEnv(gym.Env):
 
     def _normalise_actions(
         self,
-        action: int | np.ndarray | list[int] | tuple[int, int],
+        action: int | np.ndarray | list[int] | tuple[int, ...],
     ) -> np.ndarray:
         if self.num_agents == 1:
             if isinstance(action, np.ndarray):
@@ -713,98 +844,15 @@ class SARExplorationEnv(gym.Env):
 
         return conflicting_indices
 
-    def _generate_true_obstacle_grid(self) -> np.ndarray:
-        grid = np.zeros(
-            (self.grid_height, self.grid_width),
-            dtype=np.int8,
-        )
-
-        num_cells = self.grid_height * self.grid_width
-        num_obstacles = int(num_cells * self.obstacle_ratio)
-
-        available_cells = [
-            (row, col)
-            for row in range(self.grid_height)
-            for col in range(self.grid_width)
-            if (row, col) != self.base_position
-        ]
-
-        if num_obstacles > len(available_cells):
-            raise RuntimeError(
-                "Requested more obstacles than available non-base cells."
-            )
-
-        if num_obstacles > 0:
-            selected_indices = self.np_random.choice(
-                len(available_cells),
-                size=num_obstacles,
-                replace=False,
-            )
-
-            for index in selected_indices:
-                row, col = available_cells[int(index)]
-                grid[row, col] = self.OBSTACLE
-
-        base_row, base_col = self.base_position
-        grid[base_row, base_col] = self.FREE
-
-        return grid
-
-    def _get_reachable_free_cells_from_base(
-        self,
-    ) -> set[tuple[int, int]]:
-        if (
-            self.true_obstacle_grid[
-                self.base_position[0],
-                self.base_position[1],
-            ]
-            == self.OBSTACLE
-        ):
-            return set()
-
-        frontier = [self.base_position]
-        reachable = {self.base_position}
-
-        while frontier:
-            current = frontier.pop()
-
-            for neighbour in self._get_cardinal_neighbours(current):
-                if neighbour in reachable:
-                    continue
-
-                row, col = neighbour
-
-                if self.true_obstacle_grid[row, col] == self.OBSTACLE:
-                    continue
-
-                reachable.add(neighbour)
-                frontier.append(neighbour)
-
-        return reachable
-
-    def _get_cardinal_neighbours(
-        self,
-        position: tuple[int, int],
-    ) -> list[tuple[int, int]]:
-        row, col = position
-
-        candidates = [
-            (row - 1, col),
-            (row + 1, col),
-            (row, col - 1),
-            (row, col + 1),
-        ]
-
-        return [
-            cell
-            for cell in candidates
-            if self._in_bounds(cell)
-        ]
-
     def _reveal_around(
         self,
         position: tuple[int, int],
     ) -> int:
+        """
+        Reveal the cells around the position (agent pos).
+
+        Returns number of cells revealed (that is not victims).
+        """
         newly_revealed = 0
         centre_row, centre_col = position
 
@@ -826,12 +874,13 @@ class SARExplorationEnv(gym.Env):
 
                 row, col = cell
 
+                # Update counter if the grid is newly discovered
                 if self.known_obstacle_grid[row, col] == self.UNKNOWN:
                     newly_revealed += 1
 
                 self.known_obstacle_grid[row, col] = (
                     self.OBSTACLE
-                    if self.true_obstacle_grid[row, col] == self.OBSTACLE
+                    if self.obstacle_grid[row, col] == self.OBSTACLE
                     else self.FREE
                 )
 
@@ -841,8 +890,12 @@ class SARExplorationEnv(gym.Env):
         self,
         position: tuple[int, int],
     ) -> list[int]:
+        """
+        Reveal victims if cell got victims.
+
+        Returns list of newly found victims ids.
+        """
         newly_found_ids: list[int] = []
-        agent_row, agent_col = position
 
         for victim_id, victim_position in enumerate(self.victim_positions):
             if self.victim_found[victim_id]:
@@ -850,10 +903,7 @@ class SARExplorationEnv(gym.Env):
 
             victim_row, victim_col = victim_position
 
-            chebyshev_distance = max(
-                abs(agent_row - victim_row),
-                abs(agent_col - victim_col),
-            )
+            chebyshev_distance = get_chebyshev_distance(position, victim_position)
 
             if chebyshev_distance <= self.sensor_range:
                 self.victim_found[victim_id] = 1
@@ -866,7 +916,70 @@ class SARExplorationEnv(gym.Env):
 
         return newly_found_ids
 
+    def _get_reachable_cells(self, start_pos: tuple[int, int]):
+        """
+        Get reachable cells from starting position.
+
+        Returns set{reachable_cells}
+        """
+        return get_reachable_cells(
+                            grid=self.obstacle_grid,
+                            start=start_pos,
+                            blocked_value=int(self.OBSTACLE),
+                            )
+
+    def _get_reachable_cells_from_base(
+        self,
+    ) -> set[tuple[int, int]]:
+        """
+        Get reachable cells from base position.
+
+        Returns set{reachable_cells}
+        """       
+        return self._get_reachable_cells(start_pos=self.base_position)
+
+    def _get_reachable_cells_from_agent(
+        self, agent: AgentState
+    ) -> set[tuple[int, int]]:
+        """
+        Get reachable cells from agent's position.
+
+        Returns set{reachable_cells}
+        """
+        return self._get_reachable_cells(start_pos=agent.position)
+
+    def _get_reachable_cells_for_team(
+        self,
+    ) -> set[tuple[int, int]]:
+        """
+        Get team local reachable cells.
+
+        Returns the union of cells reachable by active agents.
+        """
+        reachable_cells: set[tuple[int, int]] = set()
+
+        for agent in self.agents:
+            if agent.active:
+                reachable_cells.update(
+                    self._get_reachable_cells_from_agent(agent)
+                )
+                print("Agent: ", agent)
+
+        return reachable_cells
+    
     def _get_obs(self) -> np.ndarray:
+        """
+        Observations of the env.
+
+        Returns np.array observation={
+                        known_free, # discovered free cells (pos)
+                        known_obstacles, # discovered obstacles (pos)
+                        unknown, # unknown cells (pos)
+                        agent_grid, # agent grid mask
+                        visited_grid, # visited mask
+                        victim_grid, # discovered victim mask
+                        } 
+        """
         known_free = (
             self.known_obstacle_grid == self.FREE
         ).astype(np.float32)
@@ -912,9 +1025,14 @@ class SARExplorationEnv(gym.Env):
         return observation
 
     def _get_info(self) -> dict[str, Any]:
+        """
+        Get info of the current state.
+
+        Return dict{info}.
+        """
         return {
-            "step_count": self.step_count,
-            "num_agents": self.num_agents,
+            "step_count": self.step_count, 
+            "num_agents": self.num_agents, 
             "num_victims": self.num_victims,
             "victims_found": int(self.victim_found.sum()),
             "all_victims_found": bool(np.all(self.victim_found)),
@@ -928,11 +1046,19 @@ class SARExplorationEnv(gym.Env):
                 self.victim_positions[victim_id]
                 for victim_id in range(self.num_victims)
                 if self.victim_found[victim_id]
-            ],
+            ], 
         }
 
+    ##### INFO UTILS #####
     def _get_coverage_percentage(self) -> float:
-        reachable_cells = self._get_reachable_free_cells_from_base()
+        """
+        Get the ratio of cells agent(s) covered.
+
+        Returns ratio.
+        """
+        # Reachable cells
+        reachable_cells = self._get_reachable_cells_for_team()
+        print("In get coverage: reachable_cells = ", reachable_cells)
 
         if not reachable_cells:
             return 0.0
@@ -964,6 +1090,9 @@ class SARExplorationEnv(gym.Env):
         self,
         options: dict[str, Any],
     ) -> None:
+        """
+        Set up env based on given hyperparameters in options.
+        """
         if "obstacle_ratio" in options:
             obstacle_ratio = float(options["obstacle_ratio"])
 
@@ -998,6 +1127,9 @@ class SARExplorationEnv(gym.Env):
         self,
         position: tuple[int, int],
     ) -> bool:
+        """
+        Check if position is in map.
+        """
         row, col = position
 
         return (
@@ -1016,6 +1148,9 @@ class SARExplorationEnv(gym.Env):
         max_steps: int,
         max_reset_tries: int,
     ) -> None:
+        """
+        Validate env inputs.
+        """
         if (
             len(grid_size) != 2
             or grid_size[0] <= 1
@@ -1061,13 +1196,14 @@ def run_random_policy_demo() -> None:
     """Run a short random-policy demonstration."""
 
     env = SARExplorationEnv(
-        grid_size=(8, 8),
+        grid_size=(9, 9),
         num_agents=1,
         num_victims=2,
-        obstacle_ratio=0.10,
+        obstacle_ratio=0.30,
         sensor_range=1,
-        max_steps=100,
+        max_steps=1000,
         render_mode="ansi",
+        base_position=(0, 4),
     )
 
     observation, info = env.reset(seed=42)
@@ -1093,6 +1229,13 @@ def run_random_policy_demo() -> None:
             f"Victims={info['victims_found']}/{info['num_victims']} | "
             f"Coverage={info['coverage_percentage']:.1%}"
         )
+
+        for reward_reason in info["reward_reasons"]:
+            print(
+                f"  - {reward_reason['reward_name']}: "
+                f"{reward_reason['value']:+.3f} | "
+                f"{reward_reason['reason']}"
+            )
 
         env.render()
 
