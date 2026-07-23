@@ -1,4 +1,5 @@
 # Run module from src:
+# cd <project_dir>/src
 # uv run python -m autonomous_sar_ops.envs.sar_exploration_env
 
 from __future__ import annotations
@@ -160,7 +161,7 @@ class SARExplorationEnv(gym.Env):
 
     # Actions dict
     ACTION_TO_DELTA: ClassVar[dict[Action, tuple[int, int]]] = {
-        Action.STAY: (0, 0),
+        Action.STAY: (0, 0), # Idle (stand still to let other pass)
         Action.UP: (-1, 0),
         Action.DOWN: (1, 0),
         Action.LEFT: (0, -1),
@@ -327,6 +328,7 @@ class SARExplorationEnv(gym.Env):
         info = self._get_info()
 
         return obs, info
+
     def _generate_map(self):
         """
         Generate map for env.
@@ -394,7 +396,9 @@ class SARExplorationEnv(gym.Env):
         multiplier: float = 1.0,
         metadata: dict[str, Any] | None = None,
     ) -> float:
-        """Add one reward contribution and record why it was applied."""
+        """
+        Add one reward contribution and record reasonings (why it was applied).
+        """
         base_weight = float(self.reward_weights[reward_name.value])
         contribution = base_weight * float(multiplier)
 
@@ -416,12 +420,18 @@ class SARExplorationEnv(gym.Env):
         self,
         action: int | np.ndarray | list[int] | tuple[int, ...],
     ) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
+        """
+        Agent takes action.
+        """
+
+        # Take validated action(s)
         actions = self._normalise_actions(action)
         self.step_count += 1
 
         reward_parts = {key: 0.0 for key in self.reward_weights}
         reward_reasons: list[dict[str, Any]] = []
 
+        # Add reward from step taken
         self._add_reward(
             reward_parts=reward_parts,
             reward_reasons=reward_reasons,
@@ -761,6 +771,9 @@ class SARExplorationEnv(gym.Env):
         self,
         action: int | np.ndarray | list[int] | tuple[int, ...],
     ) -> np.ndarray:
+        """
+        Validate action input(s).
+        """
         if self.num_agents == 1:
             if isinstance(action, np.ndarray):
                 if action.shape == ():
@@ -952,7 +965,7 @@ class SARExplorationEnv(gym.Env):
         self,
     ) -> set[tuple[int, int]]:
         """
-        Get team local reachable cells.
+        Get team local reachable cells (for multiagent mode).
 
         Returns the union of cells reachable by active agents.
         """
@@ -963,7 +976,7 @@ class SARExplorationEnv(gym.Env):
                 reachable_cells.update(
                     self._get_reachable_cells_from_agent(agent)
                 )
-                print("Agent: ", agent)
+                # print("Agent: ", agent)
 
         return reachable_cells
     
@@ -1028,6 +1041,9 @@ class SARExplorationEnv(gym.Env):
         """
         Get info of the current state.
 
+        info=[step count, # of agents, # of victims, victims found (current), all victim found (T/F),
+            coverage % (cells that agent been to), explored % (cells that agent knew/aware of), positions of discovered victims]
+
         Return dict{info}.
         """
         return {
@@ -1058,7 +1074,7 @@ class SARExplorationEnv(gym.Env):
         """
         # Reachable cells
         reachable_cells = self._get_reachable_cells_for_team()
-        print("In get coverage: reachable_cells = ", reachable_cells)
+        # print("In get coverage: reachable_cells = ", reachable_cells)
 
         if not reachable_cells:
             return 0.0

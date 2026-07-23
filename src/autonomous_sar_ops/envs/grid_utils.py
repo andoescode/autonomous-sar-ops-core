@@ -32,7 +32,7 @@ def get_cardinal_neighbours(
     """
     Get the neighbours within reach for agent.
 
-    Returns list[cells_near_by]
+    Returns list[cells_near_by=up,down,left,right]
     """
     row, col = position
 
