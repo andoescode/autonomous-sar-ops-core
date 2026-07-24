@@ -23,126 +23,171 @@ The system includes 2 separated repos, responsible for different sections of sys
 
 The Python core exports mission state and replay data as JSON. Unity reads the replay file and visualises the mission.
 
-## System Flow
+## Development Plan
 
-```text
-Python env + planner + controller
-        ↓
-sends agent states, routes, targets, and events
-        ↓
-Unity visualisation
+### Phase 1 — Search Environment
+
+Build a stable single-agent exploration environment with:
+
+* unknown obstacle map;
+* hidden victim locations;
+* partial observations;
+* direct movement actions;
+* sensor-based map discovery;
+* coverage and explored-percentage metrics;
+* reward-component logging;
+* deterministic test scenarios.
+
+Start with:
+
+```
+1 agent
+5 × 5 map
+1 victim
+no obstacles
 ```
 
-*For v0.1, Python owns the decision logic. Unity is mainly used to visualise agent movement, routes, obstacles, targets, and mission events.*
+Then gradually add obstacles and larger maps.
 
 ---
 
-## v0.1 Scope
+### Phase 2 — Search Baselines
 
 Implement:
 
-* 2D grid SAR environment
-* 2–3 agents
-* obstacles and blocked paths
-* search/rescue targets
-* priority zones
-* battery constraints
-* A* path planning
-* greedy task allocation baseline
-* MILP task allocation
-* replanning when a path is blocked or a new target appears
-* Unity visualisation
-* basic experiment metrics
+* random movement;
+* least-visited neighbour;
+* frontier exploration.
 
-Metrics:
-
-* mission completion time
-* total travel distance
-* coverage percentage
-* rescue/search success rate
-* number of replans
-* average battery usage
+Evaluate all baselines over fixed test seeds.
 
 ---
 
-## Build Order
+### Phase 3 — RL Search Policy
 
-1. Create the Gym-style SAR environment.
-2. Add scenario loading from YAML.
-3. Implement A* path planning.
-4. Implement greedy task allocation.
-5. Implement MILP task allocation.
-6. Add replanning for blocked paths and new targets.
-7. Connect Python mission state to Unity visualisation.
-8. Run experiments comparing greedy vs MILP.
-9. Add README, architecture diagram, and demo GIF/video.
+Train:
+
+* DQN for the single-agent environment;
+* PPO as the main baseline;
+* optional recurrent PPO for map memory and partial observability.
+
+Compare RL against frontier exploration.
 
 ---
 
-## Repo Structure
+### Phase 4 — Multi-Agent Search
+
+Extend the environment to:
+
+* multiple homogeneous agents;
+* shared discovered map;
+* joint or per-agent actions;
+* agent collision handling;
+* duplicate-exploration penalties;
+* team coverage metrics.
+
+Do not introduce heterogeneous UAV and UGV behaviour until this version is stable.
+
+---
+
+### Phase 5 — Rescue Allocation
+
+Create a separate rescue scenario using known victim locations.
+
+Implement:
+
+* A* route costs;
+* nearest-agent greedy allocation;
+* capability-aware greedy allocation;
+* MILP task allocation;
+* battery and priority constraints.
+
+---
+
+### Phase 6 — Search-to-Rescue Handover
+
+Create a conversion layer that transforms search output into rescue input.
+
+Validate that:
+
+* only discovered map cells are available;
+* only discovered victims are allocated;
+* agent locations and states are transferred correctly;
+* unreachable victims are identified;
+* rescue routes do not use unknown or blocked cells.
+
+---
+
+### Phase 7 — Integrated Sequential Mission
+
+Run the full pipeline:
 
 ```
-autonomous-sar-ops-core/
-│
-├── README.md
-├── pyproject.toml
-├── requirements.txt
-│
-├── src/
-│   └── autonomous_sar_ops/
-│       ├── envs/
-│       ├── planning/
-│       ├── mission/
-│       ├── simulation/
-│       │   ├── unity_bridge.py
-│       │   └── message_schema.py
-│       └── utils/
-│
-├── scenarios/
-├── experiments/
-├── tests/
-├── configs/
-└── docs/
-    ├── architecture.md
-    └── unity_integration.md
+RL search
+→ victim discovery
+→ map export
+→ MILP allocation
+→ A* rescue execution
+→ mission metrics
 ```
 
----
-
-## Later Expansion
-
-### v0.2 — Deep RL
-
-* PPO/DQN baseline
-* reward shaping
-* planner vs RL comparison
-
-### v0.3 — ROS2/Gazebo
-
-* ROS2 nodes
-* Gazebo world
-* planner and mission controller integration
-
-### v0.4 — Perception
-
-* synthetic data from Unity
-* object/anomaly detection
-* detection-triggered replanning
-
-### v0.5 — Dashboard/API
-
-* FastAPI backend
-* Streamlit dashboard
-* mission replay and metrics view
+This should become the first complete end-to-end portfolio demonstration.
 
 ---
 
-## Target
+### Phase 8 — Dynamic Integration
 
-Final v0.1 bullet:
+Allow search and rescue to operate concurrently.
 
-> Built an autonomous multi-agent search-and-rescue simulation system integrating a Gym-style environment, A* path planning, MILP-based task allocation, disruption-aware replanning, and Unity-based mission visualisation.
+Examples:
 
-Stronger version after experiments:
+* MILP re-solves whenever a new victim is found;
+* search agents continue exploring while rescue agents execute;
+* changing map knowledge invalidates previous rescue routes;
+* newly discovered obstacles trigger replanning.
 
-> Developed an autonomous SAR simulation platform comparing greedy and MILP-based planners across blocked-path and multi-agent scenarios using mission completion time, route distance, coverage, and rescue success metrics.
+---
+
+### Phase 9 — Learning-Augmented Optimisation
+
+Investigate tighter RL–MILP integration.
+
+Possible experiments:
+
+* MILP selects exploration regions while RL handles local movement;
+* MILP assigns frontiers to search agents;
+* RL predicts travel or service times for MILP;
+* MILP generates expert trajectories;
+* RL learns when MILP should be invoked;
+* MILP repairs infeasible RL decisions;
+* MILP action masks restrict unsafe RL actions.
+
+---
+
+# Initial Methods Compared
+
+## Search
+
+* Random policy
+* Least-visited heuristic
+* Frontier exploration
+* DQN
+* PPO
+
+## Rescue
+
+* Nearest-agent greedy allocation
+* Capability-aware greedy allocation
+* MILP allocation
+* MILP allocation with replanning
+
+## Integrated
+
+* Frontier search + greedy rescue
+* Frontier search + MILP rescue
+* RL search + greedy rescue
+* RL search + MILP rescue
+
+This creates a clear experimental matrix and isolates the contribution of each component.
+
+---
