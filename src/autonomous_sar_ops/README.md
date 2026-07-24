@@ -1,6 +1,5 @@
-## Core Research Questions
-
-### Search
+# Project Objectives
+## Search
 
 > Can reinforcement learning agents efficiently explore a partially observable environment and locate hidden victims?
 
@@ -14,7 +13,7 @@ The search project focuses on:
 * reward design;
 * generalisation to unseen maps.
 
-### Rescue
+## Rescue
 
 > Given discovered victims, agent capabilities, travel costs, and mission constraints, how should rescue tasks be allocated and scheduled?
 
@@ -28,7 +27,7 @@ The rescue project focuses on:
 * route feasibility;
 * dynamic replanning.
 
-### Future Integration
+## Future Integration
 
 > Can MILP-based planning improve or constrain RL policy decisions without replacing the exploration policy?
 
@@ -44,7 +43,7 @@ Potential future integrations include:
 
 ---
 
-## System Architecture
+# System Architecture
 
 ```
 Python Core Repository
